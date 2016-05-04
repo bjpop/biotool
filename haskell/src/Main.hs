@@ -12,9 +12,11 @@ import Bio.Sequence.Fasta
 import Options.Applicative 
    ( Parser, option, auto, long, metavar, help, value
    , some, argument, str, info, execParser, switch
-   , fullDesc, (<*>), (<$>), (<>), helper, progDesc )
+   , fullDesc, (<*>), (<$>), (<>), (<|>), helper, progDesc )
 import Data.List
     ( foldl', intersperse )
+import System.IO
+    ( hPutStrLn, stderr)
 
 defaultMinLen :: Integer
 defaultMinLen = 0
@@ -56,54 +58,48 @@ processFastaFiles files = putStrLn header >> mapM_ processFile files
 processFile :: FilePath -> IO ()
 processFile filePath = do
     sequences <- readFasta filePath
-    case sequences of
-        [] -> return ()
-        (firstSeq:restSeqs) -> do
-            let stats = foldl' updateStats (initStats firstSeq) restSeqs
-            putStrLn $ prettyOutput filePath stats 
+    let stats = foldl' updateStats initStats sequences
+    case prettyOutput filePath stats of
+        Left err -> hPutStrLn stderr err
+        Right msg -> putStrLn msg
 
-prettyOutput :: FilePath -> Stats -> String
-prettyOutput filePath stats@(Stats {..}) =
-    concat $ intersperse "\t" (filePath : numbers)
-    where
-    average = round (fromIntegral numBases / 
+prettyOutput :: FilePath -> Stats -> Either String String
+prettyOutput filePath stats@(Stats {..})
+    | numSequences <= 0 = Left $ "Skipping " ++ filePath ++ " - doesn't seem to be FASTA?"
+    | otherwise = Right $ concat $ intersperse "\t" (filePath : numbers)
+  where
+    average = round (fromIntegral numBases /
                      fromIntegral numSequences)
-    numbers = map show [ numSequences
-                       , numBases
-                       , minSequenceLength
-                       , average
-                       , maxSequenceLength]
+    numbers = [ show numSequences
+              , show numBases
+              , maybe "NaN" show minSequenceLength
+              , if numSequences==0 then "NaN" else show average
+              , maybe "NaN" show maxSequenceLength]
 
 data Stats =
-    Stats 
+    Stats
     { numSequences :: !Integer
     , numBases :: !Integer
-    , minSequenceLength :: !Integer
-    , maxSequenceLength :: !Integer
+    , minSequenceLength :: Maybe Integer
+    , maxSequenceLength :: Maybe Integer
     }
     deriving (Eq, Ord, Show)
 
-initStats :: Sequence -> Stats
-initStats sequence = Stats
-    { numSequences = 1
-    , numBases = thisLength 
-    , minSequenceLength = thisLength
-    , maxSequenceLength = thisLength
+initStats :: Stats
+initStats = Stats
+    { numSequences = 0
+    , numBases = 0
+    , minSequenceLength = Nothing
+    , maxSequenceLength = Nothing
     }
-    where
-    thisLength = fromIntegral $ seqlength sequence
 
 updateStats :: Stats -> Sequence -> Stats
-updateStats (Stats {..}) sequence =
-    Stats newNumSequences newNumBases
-          newMinSequenceLength newMaxSequenceLength 
+updateStats stats@(Stats {..}) sequence =
+    stats { numSequences = numSequences + 1
+          , numBases = numBases + thisLength
+          , minSequenceLength = newLength min minSequenceLength
+          , maxSequenceLength = newLength max maxSequenceLength
+          }
     where
-    newNumSequences = numSequences + 1
     thisLength = fromIntegral $ seqlength sequence
-    newNumBases = numBases + thisLength 
-    newMinSequenceLength
-        | thisLength < minSequenceLength = thisLength
-        | otherwise = minSequenceLength 
-    newMaxSequenceLength
-        | thisLength > maxSequenceLength = thisLength
-        | otherwise = maxSequenceLength 
+    newLength f old = f thisLength <$> old  <|> Just thisLength
